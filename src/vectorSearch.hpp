@@ -9,8 +9,11 @@
 
 struct ReferenceStore {
     std::uint32_t count = 0;
+    std::uint32_t nlist = 0;
     std::size_t mappedSize = 0;
     const std::uint8_t* mappedData = nullptr;
+    const std::int16_t* centroids = nullptr;
+    const std::uint32_t* offsets = nullptr;
     const std::uint8_t* vectors = nullptr;
     const std::uint8_t* labels = nullptr;
 
@@ -42,10 +45,10 @@ struct DistanceValidationResult {
     int firstAvx2Distance = 0;
 };
 
-std::array<bool, 5> kNearestNeighbor(const std::array<std::uint8_t, 14>& queryVector);
+std::array<bool, 5> approximateNearestFraudLabels(const std::array<std::uint8_t, 14>& queryVector);
 FraudScoreResult transactionIsApproved(const std::array<float, 14>& queryVector);
 const ReferenceStore& getReferences();
-ReferenceStore loadBinaryReferences(const std::string& path);
+ReferenceStore loadIvfReferences(const std::string& path);
 int euclideanDistance(const std::array<std::uint8_t, 14>& queryVector, const std::uint8_t* referenceVector);
 DistanceValidationResult validateDistanceImplementations(const std::array<std::uint8_t, 14>& queryVector, std::size_t sampleCount);
 

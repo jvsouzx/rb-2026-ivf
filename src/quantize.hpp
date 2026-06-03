@@ -15,6 +15,10 @@ inline uint8_t quantize(float value){
     return static_cast<uint8_t>(std::clamp(q, 0, 254));
 }
 
+inline int16_t quantizedDistanceValue(uint8_t value) {
+    return value == 255 ? static_cast<int16_t>(-254) : static_cast<int16_t>(value);
+}
+
 inline std::array<std::uint8_t, 14> quantizeVector(const std::array<float, 14>& v) {
     std::array<std::uint8_t, 14> out{};
     for (int i = 0; i < 14; ++i) out[i] = quantize(v[i]);
@@ -22,4 +26,3 @@ inline std::array<std::uint8_t, 14> quantizeVector(const std::array<float, 14>& 
 }
 
 #endif
-
