@@ -68,4 +68,32 @@ Isso amarra o ciclo de vida de um recurso ao ciclo de vida de um objeto. O recur
 - Operações com binários
 - mmap em c++
 
+## IVF-Flat custom
 
+1. Preprocess:
+   - Ler `references.json.gz`.
+   - Treinar k-means em uma amostra dos vetores, ainda em `float`.
+   - Gerar `nlist` centroides, ex: `4096` ou `8192`.
+   - Quantizar os vetores e os centroides para `uint8_t`.
+   - Atribuir cada referência ao centroide quantizado mais próximo.
+   - Reordenar as referências por lista invertida.
+   - Gravar um arquivo binário IVF acessado por `mmap`:
+     - header
+     - centroides
+     - offsets das listas
+     - vetores quantizados
+     - labels
+
+2. Implementar runtime
+    - mmap do índice IVF;
+    - distância query-centroid;
+    - selecionar nprobe melhores clusters;
+    - rescoring com AVX2 atual;
+    - top 5;
+    - testar nprobe = 1, 2, 4, 8;
+    - testar candidate_cap = 512, 1024, 2048.
+
+3. Tuning
+    - medir p99 no k6
+    - medir fp, fn, failure_rate
+    - priorizar a redução de fn

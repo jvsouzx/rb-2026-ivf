@@ -1,21 +1,120 @@
 #include "vectorSearch.hpp"
+
+#include "quantize.hpp"
+
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
-#include <stdexcept>
-#include <iostream>
-#include <cmath>
 #include <immintrin.h>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include "quantize.hpp"
+
+const ReferenceStore& getReferences();
 
 namespace {
-    constexpr std::uint32_t ReferencesMagic = 0x32464252;
+    constexpr std::uint32_t IvfReferencesMagic = 0x56494252; // "RBIV"
+    constexpr std::uint32_t IvfVersion = 2;
     constexpr int VectorDimensions = 14;
-    constexpr std::size_t HeaderSize = sizeof(std::uint32_t) * 2;
+    constexpr std::size_t HeaderSize = sizeof(std::uint32_t) * 5;
+    constexpr std::uint32_t MaxCentroidCandidates = 128;
+
+    struct CentroidCandidate {
+        int distance = std::numeric_limits<int>::max();
+        std::uint32_t id = 0;
+    };
+
+    struct AnnSearchParams {
+        std::uint32_t nprobe;
+        std::size_t candidateCap;
+    };
+
+    struct AnnSearchResult {
+        std::array<bool, 5> fraudLabels{};
+        int fraudCount = 0;
+    };
+
+    std::size_t align4(std::size_t value) {
+        return (value + 3) & ~static_cast<std::size_t>(3);
+    }
+
+    std::uint32_t readUInt32(const std::uint8_t* data) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, data, sizeof(value));
+        return value;
+    }
+
+    std::uint32_t readUIntEnv(const char* name, std::uint32_t fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr) {
+            return fallback;
+        }
+
+        try {
+            unsigned long parsed = std::stoul(value);
+            if (parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+                return fallback;
+            }
+            return static_cast<std::uint32_t>(parsed);
+        } catch (...) {
+            return fallback;
+        }
+    }
+
+    std::size_t readSizeEnv(const char* name, std::size_t fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr) {
+            return fallback;
+        }
+
+        try {
+            unsigned long long parsed = std::stoull(value);
+            if (parsed == 0) {
+                return fallback;
+            }
+            return static_cast<std::size_t>(parsed);
+        } catch (...) {
+            return fallback;
+        }
+    }
+
+    std::string readStringEnv(const char* name, const std::string& fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return fallback;
+        }
+
+        return value;
+    }
+
+    std::uint32_t configuredNProbe(std::uint32_t nlist) {
+        static const std::uint32_t requested = readUIntEnv("RB_IVF_NPROBE", 4);
+        return std::clamp<std::uint32_t>(requested, 1, std::min(nlist, MaxCentroidCandidates));
+    }
+
+    std::uint32_t configuredFallbackNProbe(std::uint32_t nlist, std::uint32_t firstPassNProbe) {
+        static const std::uint32_t requested = readUIntEnv("RB_IVF_FALLBACK_NPROBE", 32);
+        std::uint32_t fallback = std::max(requested, firstPassNProbe);
+        return std::clamp<std::uint32_t>(fallback, 1, std::min(nlist, MaxCentroidCandidates));
+    }
+
+    std::size_t configuredCandidateCap() {
+        static const std::size_t value = std::max<std::size_t>(5, readSizeEnv("RB_IVF_CANDIDATE_CAP", 2048));
+        return value;
+    }
+
+    std::size_t configuredFallbackCandidateCap(std::size_t firstPassCandidateCap) {
+        static const std::size_t requested = readSizeEnv("RB_IVF_FALLBACK_CANDIDATE_CAP", 16384);
+        return std::max<std::size_t>(std::max<std::size_t>(5, requested), firstPassCandidateCap);
+    }
 
     int horizontalSum8x32(__m256i values) {
         __m128i low = _mm256_castsi256_si128(values);
@@ -48,10 +147,34 @@ namespace {
 
         __m256i refWords = _mm256_cvtepu8_epi16(refBytes);
         __m256i queryWords = _mm256_cvtepu8_epi16(queryBytes);
+        const __m256i sentinel = _mm256_set1_epi16(255);
+        const __m256i sentinelValue = _mm256_set1_epi16(-254);
+        refWords = _mm256_blendv_epi8(refWords, sentinelValue, _mm256_cmpeq_epi16(refWords, sentinel));
+        queryWords = _mm256_blendv_epi8(queryWords, sentinelValue, _mm256_cmpeq_epi16(queryWords, sentinel));
         __m256i diff = _mm256_sub_epi16(refWords, queryWords);
         __m256i squares = _mm256_madd_epi16(diff, diff);
 
         return horizontalSum8x32(squares);
+    }
+
+    int euclideanDistanceScalar(const std::uint8_t* lhs, const std::uint8_t* rhs) {
+        int distance = 0;
+        for (int dim = 0; dim < VectorDimensions; ++dim) {
+            int diff = static_cast<int>(quantizedDistanceValue(lhs[dim])) - static_cast<int>(quantizedDistanceValue(rhs[dim]));
+            distance += diff * diff;
+        }
+
+        return distance;
+    }
+
+    int euclideanDistanceToCentroid(const std::uint8_t* queryVector, const std::int16_t* centroidVector) {
+        int distance = 0;
+        for (int dim = 0; dim < VectorDimensions; ++dim) {
+            int diff = static_cast<int>(quantizedDistanceValue(queryVector[dim])) - static_cast<int>(centroidVector[dim]);
+            distance += diff * diff;
+        }
+
+        return distance;
     }
 
     int findWorstNeighborIndex(const std::array<Neighbor, 5>& neighbors) {
@@ -64,6 +187,124 @@ namespace {
 
         return worstIndex;
     }
+
+    void updateTop5(std::array<Neighbor, 5>& nearest, int& nearestSize, int& worstIndex, Neighbor candidate) {
+        if (nearestSize < 5) {
+            nearest[nearestSize] = candidate;
+            nearestSize++;
+            if (nearestSize == 5) {
+                worstIndex = findWorstNeighborIndex(nearest);
+            }
+            return;
+        }
+
+        if (candidate.distance < nearest[worstIndex].distance) {
+            nearest[worstIndex] = candidate;
+            worstIndex = findWorstNeighborIndex(nearest);
+        }
+    }
+
+    int findWorstCentroidIndex(const std::array<CentroidCandidate, MaxCentroidCandidates>& candidates, std::uint32_t size) {
+        int worstIndex = 0;
+        for (std::uint32_t i = 1; i < size; ++i) {
+            if (candidates[i].distance > candidates[worstIndex].distance) {
+                worstIndex = static_cast<int>(i);
+            }
+        }
+
+        return worstIndex;
+    }
+
+    std::uint32_t selectCentroids(
+        const ReferenceStore& refs,
+        const std::array<std::uint8_t, 14>& queryVector,
+        std::array<CentroidCandidate, MaxCentroidCandidates>& selected,
+        std::uint32_t nprobe) {
+        const std::uint32_t desired = std::min<std::uint32_t>(
+            refs.nlist,
+            std::min<std::uint32_t>(MaxCentroidCandidates, std::max<std::uint32_t>(nprobe, nprobe * 4)));
+
+        std::uint32_t selectedSize = 0;
+        int worstIndex = 0;
+
+        for (std::uint32_t centroid = 0; centroid < refs.nlist; ++centroid) {
+            const std::int16_t* centroidVector = refs.centroids + static_cast<std::size_t>(centroid) * VectorDimensions;
+            CentroidCandidate candidate{euclideanDistanceToCentroid(queryVector.data(), centroidVector), centroid};
+
+            if (selectedSize < desired) {
+                selected[selectedSize] = candidate;
+                selectedSize++;
+                if (selectedSize == desired) {
+                    worstIndex = findWorstCentroidIndex(selected, selectedSize);
+                }
+                continue;
+            }
+
+            if (candidate.distance < selected[worstIndex].distance) {
+                selected[worstIndex] = candidate;
+                worstIndex = findWorstCentroidIndex(selected, selectedSize);
+            }
+        }
+
+        std::sort(
+            selected.begin(),
+            selected.begin() + selectedSize,
+            [](const CentroidCandidate& lhs, const CentroidCandidate& rhs) {
+                return lhs.distance < rhs.distance;
+            });
+
+        return selectedSize;
+    }
+
+    AnnSearchResult searchApproximateNeighbors(const std::array<std::uint8_t, 14>& queryVector, AnnSearchParams params) {
+        const ReferenceStore& refs = getReferences();
+        std::array<Neighbor, 5> nearest{};
+        std::array<CentroidCandidate, MaxCentroidCandidates> centroids{};
+        int nearestSize = 0;
+        int worstIndex = 0;
+        std::size_t candidatesScanned = 0;
+        __m128i queryBytes = paddedQueryBytes(queryVector);
+
+        params.nprobe = std::clamp<std::uint32_t>(params.nprobe, 1, std::min(refs.nlist, MaxCentroidCandidates));
+        params.candidateCap = std::max<std::size_t>(5, params.candidateCap);
+
+        std::uint32_t centroidCount = selectCentroids(refs, queryVector, centroids, params.nprobe);
+
+        for (std::uint32_t probeIndex = 0; probeIndex < centroidCount; ++probeIndex) {
+            if (probeIndex >= params.nprobe && nearestSize == 5) {
+                break;
+            }
+
+            std::uint32_t centroid = centroids[probeIndex].id;
+            std::uint32_t begin = refs.offsets[centroid];
+            std::uint32_t end = refs.offsets[centroid + 1];
+
+            for (std::uint32_t position = begin; position < end; ++position) {
+                if (nearestSize == 5 && candidatesScanned >= params.candidateCap) {
+                    break;
+                }
+
+                const std::uint8_t* vector = refs.vectors + static_cast<std::size_t>(position) * VectorDimensions;
+                int distance = euclideanDistanceAvx2(queryBytes, vector);
+                updateTop5(nearest, nearestSize, worstIndex, Neighbor{distance, refs.labels[position] == 1});
+                candidatesScanned++;
+            }
+
+            if (nearestSize == 5 && candidatesScanned >= params.candidateCap) {
+                break;
+            }
+        }
+
+        AnnSearchResult result;
+        for (int i = 0; i < nearestSize; ++i) {
+            result.fraudLabels[i] = nearest[i].fraud;
+            if (nearest[i].fraud) {
+                result.fraudCount++;
+            }
+        }
+
+        return result;
+    }
 }
 
 ReferenceStore::~ReferenceStore() {
@@ -74,13 +315,19 @@ ReferenceStore::~ReferenceStore() {
 
 ReferenceStore::ReferenceStore(ReferenceStore&& other) noexcept
     : count(other.count),
+      nlist(other.nlist),
       mappedSize(other.mappedSize),
       mappedData(other.mappedData),
+      centroids(other.centroids),
+      offsets(other.offsets),
       vectors(other.vectors),
       labels(other.labels) {
     other.count = 0;
+    other.nlist = 0;
     other.mappedSize = 0;
     other.mappedData = nullptr;
+    other.centroids = nullptr;
+    other.offsets = nullptr;
     other.vectors = nullptr;
     other.labels = nullptr;
 }
@@ -92,14 +339,20 @@ ReferenceStore& ReferenceStore::operator=(ReferenceStore&& other) noexcept {
         }
 
         count = other.count;
+        nlist = other.nlist;
         mappedSize = other.mappedSize;
         mappedData = other.mappedData;
+        centroids = other.centroids;
+        offsets = other.offsets;
         vectors = other.vectors;
         labels = other.labels;
 
         other.count = 0;
+        other.nlist = 0;
         other.mappedSize = 0;
         other.mappedData = nullptr;
+        other.centroids = nullptr;
+        other.offsets = nullptr;
         other.vectors = nullptr;
         other.labels = nullptr;
     }
@@ -107,7 +360,7 @@ ReferenceStore& ReferenceStore::operator=(ReferenceStore&& other) noexcept {
     return *this;
 }
 
-ReferenceStore loadBinaryReferences(const std::string& path) {
+ReferenceStore loadIvfReferences(const std::string& path) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd == -1) {
         throw std::runtime_error("Erro ao abrir " + path);
@@ -121,7 +374,7 @@ ReferenceStore loadBinaryReferences(const std::string& path) {
 
     if (fileStat.st_size < static_cast<off_t>(HeaderSize)) {
         close(fd);
-        throw std::runtime_error("Arquivo de referencias binario muito pequeno: " + path);
+        throw std::runtime_error("Arquivo IVF muito pequeno: " + path);
     }
 
     std::size_t mappedSize = static_cast<std::size_t>(fileStat.st_size);
@@ -134,48 +387,60 @@ ReferenceStore loadBinaryReferences(const std::string& path) {
 
     const auto* data = static_cast<const std::uint8_t*>(mapping);
 
-    std::uint32_t magic = 0;
-    std::uint32_t count = 0;
-    std::memcpy(&magic, data, sizeof(magic));
-    std::memcpy(&count, data + sizeof(magic), sizeof(count));
+    std::uint32_t magic = readUInt32(data);
+    std::uint32_t version = readUInt32(data + sizeof(std::uint32_t));
+    std::uint32_t count = readUInt32(data + sizeof(std::uint32_t) * 2);
+    std::uint32_t dimensions = readUInt32(data + sizeof(std::uint32_t) * 3);
+    std::uint32_t nlist = readUInt32(data + sizeof(std::uint32_t) * 4);
 
-    if (magic != ReferencesMagic) {
+    if (magic != IvfReferencesMagic || version != IvfVersion || dimensions != VectorDimensions || count == 0 || nlist == 0) {
         munmap(mapping, mappedSize);
-        throw std::runtime_error("Arquivo de referencias binario invalido: " + path);
+        throw std::runtime_error("Arquivo IVF invalido: " + path);
     }
 
+    std::size_t centroidsSize = static_cast<std::size_t>(nlist) * VectorDimensions * sizeof(std::int16_t);
+    std::size_t offsetsStart = align4(HeaderSize + centroidsSize);
+    std::size_t offsetsSize = (static_cast<std::size_t>(nlist) + 1) * sizeof(std::uint32_t);
+    std::size_t vectorsStart = offsetsStart + offsetsSize;
     std::size_t vectorsSize = static_cast<std::size_t>(count) * VectorDimensions;
+    std::size_t labelsStart = vectorsStart + vectorsSize;
     std::size_t labelsSize = count;
-    std::size_t expectedSize = HeaderSize + vectorsSize + labelsSize;
+    std::size_t expectedSize = labelsStart + labelsSize;
 
     if (mappedSize != expectedSize) {
         munmap(mapping, mappedSize);
-        throw std::runtime_error("Tamanho inesperado do arquivo de referencias: " + path);
+        throw std::runtime_error("Tamanho inesperado do arquivo IVF: " + path);
+    }
+
+    const auto* offsets = reinterpret_cast<const std::uint32_t*>(data + offsetsStart);
+    if (offsets[0] != 0 || offsets[nlist] != count) {
+        munmap(mapping, mappedSize);
+        throw std::runtime_error("Offsets invalidos no arquivo IVF: " + path);
     }
 
     ReferenceStore store;
     store.count = count;
+    store.nlist = nlist;
     store.mappedSize = mappedSize;
     store.mappedData = data;
-    store.vectors = data + HeaderSize;
-    store.labels = store.vectors + vectorsSize;
+    store.centroids = reinterpret_cast<const std::int16_t*>(data + HeaderSize);
+    store.offsets = offsets;
+    store.vectors = data + vectorsStart;
+    store.labels = data + labelsStart;
 
-    std::cout << "Carregadas " << store.count << " referencias binarias\n";
+    std::cout << "Carregadas " << store.count
+              << " referencias IVF em " << store.nlist << " listas\n";
     return store;
 }
 
 const ReferenceStore& getReferences(){
-    static const ReferenceStore references = loadBinaryReferences("resources/references.bin");
+    static const ReferenceStore references = loadIvfReferences(
+        readStringEnv("RB_REFERENCES_IVF_PATH", "resources/references.ivf"));
     return references;
 }
 
 int euclideanDistance(const std::array<uint8_t, 14>& queryVector, const uint8_t* referenceVector) {
-    int distance = 0;
-    for (int i = 0; i < VectorDimensions; i++){
-        int diff = static_cast<int>(referenceVector[i]) - static_cast<int>(queryVector[i]);
-        distance += diff * diff;
-    }
-    return distance;
+    return euclideanDistanceScalar(queryVector.data(), referenceVector);
 }
 
 DistanceValidationResult validateDistanceImplementations(const std::array<std::uint8_t, 14>& queryVector, std::size_t sampleCount) {
@@ -204,49 +469,27 @@ DistanceValidationResult validateDistanceImplementations(const std::array<std::u
     return result;
 }
 
-std::array<bool, 5> kNearestNeighbor(const std::array<uint8_t, 14>& queryVector){
+std::array<bool, 5> approximateNearestFraudLabels(const std::array<uint8_t, 14>& queryVector){
     const ReferenceStore& refs = getReferences();
-    std::array<Neighbor, 5> nearest{};
-    __m128i queryBytes = paddedQueryBytes(queryVector);
-
-    for (std::uint32_t i = 0; i < 5; ++i) {
-        const uint8_t* vector = refs.vectors + static_cast<std::size_t>(i) * VectorDimensions;
-        int distance = euclideanDistanceAvx2(queryBytes, vector);
-        nearest[i] = Neighbor{distance, refs.labels[i] == 1};
-    }
-
-    int worstIndex = findWorstNeighborIndex(nearest);
-
-    for (std::uint32_t i = 5; i < refs.count; ++i){
-        const uint8_t* vector = refs.vectors + static_cast<std::size_t>(i) * VectorDimensions;
-        int distance = euclideanDistanceAvx2(queryBytes, vector);
-
-        if (distance < nearest[worstIndex].distance) {
-            nearest[worstIndex] = Neighbor{distance, refs.labels[i] == 1};
-            worstIndex = findWorstNeighborIndex(nearest);
-        }
-    }
-
-    std::array<bool, 5> result{};
-    for (int i = 0; i < 5; ++i){
-        result[i] = nearest[i].fraud;
-    }
-    
-    return result;
+    AnnSearchParams params{configuredNProbe(refs.nlist), configuredCandidateCap()};
+    return searchApproximateNeighbors(queryVector, params).fraudLabels;
 }
 
 FraudScoreResult transactionIsApproved(const std::array<float, 14>& queryVector){
+    const ReferenceStore& refs = getReferences();
     std::array<uint8_t, 14> quantQuery = quantizeVector(queryVector);
-    std::array<bool, 5> nearest = kNearestNeighbor(quantQuery);
-    int fraudCount = 0;
+    AnnSearchParams firstPassParams{configuredNProbe(refs.nlist), configuredCandidateCap()};
+    AnnSearchResult searchResult = searchApproximateNeighbors(quantQuery, firstPassParams);
 
-    for (bool isFraud : nearest) {
-        if (isFraud) {
-            fraudCount++;
-        }
+    if (searchResult.fraudCount == 2 || searchResult.fraudCount == 3) {
+        AnnSearchParams fallbackParams{
+            configuredFallbackNProbe(refs.nlist, firstPassParams.nprobe),
+            configuredFallbackCandidateCap(firstPassParams.candidateCap)
+        };
+        searchResult = searchApproximateNeighbors(quantQuery, fallbackParams);
     }
 
-    float fraudScore = fraudCount / 5.0f;
+    float fraudScore = searchResult.fraudCount / 5.0f;
     bool approved = fraudScore < 0.6f;
 
     return FraudScoreResult{approved, fraudScore};

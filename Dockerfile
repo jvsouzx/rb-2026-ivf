@@ -1,6 +1,13 @@
 FROM debian:bookworm-slim AS build
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG RB_IVF_NLIST=8192
+ARG RB_IVF_SAMPLE_SIZE=200000
+ARG RB_IVF_ITERATIONS=12
+
+ENV RB_IVF_NLIST=${RB_IVF_NLIST}
+ENV RB_IVF_SAMPLE_SIZE=${RB_IVF_SAMPLE_SIZE}
+ENV RB_IVF_ITERATIONS=${RB_IVF_ITERATIONS}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -47,7 +54,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY resources/mcc_risk.json resources/normalization.json ./resources/
-COPY --from=build /src/resources/references.bin ./resources/references.bin
+COPY --from=build /src/resources/references.ivf ./resources/references.ivf
 COPY --from=build /src/build/fraud_api ./fraud_api
 
 EXPOSE 8080

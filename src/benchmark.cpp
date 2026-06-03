@@ -88,9 +88,9 @@ int main() {
 
     std::cout << "requests=" << requests << "\n";
     std::cout << "denied=" << denied << "\n";
-    std::cout << "knn_avg_ms=" << (totalMs / requests) << "\n";
-    std::cout << "knn_min_ms=" << minMs << "\n";
-    std::cout << "knn_max_ms=" << maxMs << "\n";
+    std::cout << "ann_avg_ms=" << (totalMs / requests) << "\n";
+    std::cout << "ann_min_ms=" << minMs << "\n";
+    std::cout << "ann_max_ms=" << maxMs << "\n";
 
     return 0;
 }
