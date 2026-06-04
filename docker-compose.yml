@@ -1,0 +1,51 @@
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "9999:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app1
+      - app2
+    networks:
+      - lb-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 50MB
+
+  app1:
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.1
+    environment:
+      RB_IVF_NPROBE: "8"
+      RB_IVF_CANDIDATE_CAP: "2048"
+      RB_IVF_FALLBACK_NPROBE: "32"
+      RB_IVF_FALLBACK_CANDIDATE_CAP: "16384"
+    networks:
+      - lb-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: 150MB
+
+  app2:
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.1
+    environment:
+      RB_IVF_NPROBE: "8"
+      RB_IVF_CANDIDATE_CAP: "2048"
+      RB_IVF_FALLBACK_NPROBE: "32"
+      RB_IVF_FALLBACK_CANDIDATE_CAP: "16384"
+    networks:
+      - lb-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: 150MB
+
+networks:
+  lb-net:
+    driver: bridge

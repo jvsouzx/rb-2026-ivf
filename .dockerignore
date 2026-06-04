@@ -1,9 +1,0 @@
-.git
-build
-build-*
-.cache
-.vscode
-.idea
-Dockerfile
-docker-compose.yaml
-resources/references.bin

@@ -1,0 +1,7 @@
+{
+  "participants": ["Jorge Vitor Gonçalves de Souza"],
+  "social": ["https://github.com/jvsouzx"],
+  "source-code-repo": "https://github.com/jvsouzx/rb-2026-ivf",
+  "stack": ["c++", "uwebsockets", "nginx", "docker", "ivf-flat", "avx2"],
+  "open_to_work": true
+}
