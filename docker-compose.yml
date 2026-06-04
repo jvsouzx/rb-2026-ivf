@@ -17,7 +17,7 @@ services:
           memory: 50MB
 
   app1:
-    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.1
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.2
     environment:
       RB_IVF_NPROBE: "4"
       RB_IVF_CANDIDATE_CAP: "1024"
@@ -32,7 +32,7 @@ services:
           memory: 150MB
 
   app2:
-    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.1
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.2
     environment:
       RB_IVF_NPROBE: "4"
       RB_IVF_CANDIDATE_CAP: "1024"
