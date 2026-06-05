@@ -3,11 +3,25 @@
 #include <uwebsockets/App.h>
 #include <iostream>
 #include <string>
-#include <nlohmann/json.hpp>
+
+namespace {
+    const char* fraudScoreText(float score) {
+        int bucket = static_cast<int>(score * 5.0f + 0.5f);
+        switch (bucket) {
+            case 0: return "0.0";
+            case 1: return "0.2";
+            case 2: return "0.4";
+            case 3: return "0.6";
+            case 4: return "0.8";
+            default: return "1.0";
+        }
+    }
+}
 
 int main(){
     getReferences();
     getMccRisk();
+    warmReferences();
 
     uWS::App app;
 
@@ -29,13 +43,17 @@ int main(){
                 std::array<float, 14> normalizedVector = vectorizeTransaction(body);
                 FraudScoreResult fraudScoreResult = transactionIsApproved(normalizedVector);
 
-                nlohmann::json response;
-                response["approved"] = fraudScoreResult.approved;
-                response["fraud_score"] = fraudScoreResult.fraudScore;
+                std::string response;
+                response.reserve(43);
+                response.append(R"({"approved":)");
+                response.append(fraudScoreResult.approved ? "true" : "false");
+                response.append(R"(,"fraud_score":)");
+                response.append(fraudScoreText(fraudScoreResult.fraudScore));
+                response.push_back('}');
 
                 res->writeStatus("200 OK");
                 res->writeHeader("content-type", "application/json");
-                res->end(response.dump());
+                res->end(response);
             }
         });
     });

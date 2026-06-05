@@ -24,10 +24,10 @@ services:
         RB_IVF_ITERATIONS: "12"
     image: rb-2026-app
     environment:
-      RB_IVF_NPROBE: "8"
-      RB_IVF_CANDIDATE_CAP: "2048"
-      RB_IVF_FALLBACK_NPROBE: "8"
-      RB_IVF_FALLBACK_CANDIDATE_CAP: "2048"
+      RB_IVF_NPROBE: "4"
+      RB_IVF_CANDIDATE_CAP: "1024"
+      RB_IVF_FALLBACK_NPROBE: "4"
+      RB_IVF_FALLBACK_CANDIDATE_CAP: "1024"
     deploy:
       replicas: 2
       resources:

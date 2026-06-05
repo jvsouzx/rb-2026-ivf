@@ -2,12 +2,11 @@
 
 #include <nlohmann/json.hpp>
 #include <array>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <algorithm>
 #include <fstream>
-#include <vector>
-#include <ctime>
 
 using json = nlohmann::json;
 
@@ -35,14 +34,25 @@ namespace {
         return std::clamp((value/maxValue), 0.0f, 1.0f);
     }
 
+    int parse2(std::string_view value, std::size_t offset) {
+        return (value[offset] - '0') * 10 + (value[offset + 1] - '0');
+    }
+
+    int parse4(std::string_view value, std::size_t offset) {
+        return (value[offset] - '0') * 1000
+            + (value[offset + 1] - '0') * 100
+            + (value[offset + 2] - '0') * 10
+            + (value[offset + 3] - '0');
+    }
+
     int hourOfDay(std::string_view timestamp){
-        return std::stoi(std::string(timestamp.substr(11, 2)));
+        return parse2(timestamp, 11);
     }
 
     int dayOfWeek(std::string_view timestamp) {
-        int y = std::stoi(std::string(timestamp.substr(0, 4)));
-        int m = std::stoi(std::string(timestamp.substr(5, 2)));
-        int d = std::stoi(std::string(timestamp.substr(8, 2)));
+        int y = parse4(timestamp, 0);
+        int m = parse2(timestamp, 5);
+        int d = parse2(timestamp, 8);
 
         static int offsets[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
 
@@ -55,27 +65,31 @@ namespace {
         return (dow + 6) % 7;
     }
 
-    std::tm parseTimestamp(std::string_view timestamp) {
-        std::tm tm{};
+    int daysFromCivil(int year, unsigned month, unsigned day) {
+        year -= month <= 2;
+        const int era = (year >= 0 ? year : year - 399) / 400;
+        const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+        const unsigned dayOfYear = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+        const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+        return era * 146097 + static_cast<int>(dayOfEra) - 719468;
+    }
 
-        tm.tm_year = std::stoi(std::string(timestamp.substr(0, 4))) - 1900;
-        tm.tm_mon  = std::stoi(std::string(timestamp.substr(5, 2))) - 1;
-        tm.tm_mday = std::stoi(std::string(timestamp.substr(8, 2)));
-        tm.tm_hour = std::stoi(std::string(timestamp.substr(11, 2)));
-        tm.tm_min  = std::stoi(std::string(timestamp.substr(14, 2)));
-        tm.tm_sec  = std::stoi(std::string(timestamp.substr(17, 2)));
+    std::int64_t secondsSinceEpoch(std::string_view timestamp) {
+        int year = parse4(timestamp, 0);
+        unsigned month = static_cast<unsigned>(parse2(timestamp, 5));
+        unsigned day = static_cast<unsigned>(parse2(timestamp, 8));
+        int hour = parse2(timestamp, 11);
+        int minute = parse2(timestamp, 14);
+        int second = parse2(timestamp, 17);
 
-        return tm;
+        return static_cast<std::int64_t>(daysFromCivil(year, month, day)) * 86400
+            + hour * 3600
+            + minute * 60
+            + second;
     }
 
     int minutesBetween(std::string_view from, std::string_view to) {
-        std::tm fromTm = parseTimestamp(from);
-        std::tm toTm = parseTimestamp(to);
-
-        std::time_t fromTime = timegm(&fromTm);
-        std::time_t toTime = timegm(&toTm);
-
-        return static_cast<int>((toTime - fromTime) / 60);
+        return static_cast<int>((secondsSinceEpoch(to) - secondsSinceEpoch(from)) / 60);
     }
 }
 
@@ -89,7 +103,7 @@ std::array<float, 14> vectorizeTransaction(std::string_view body) {
     int transactionInstallments = payload["transaction"]["installments"].get<int>();
     vector[1] = normalize(transactionInstallments, 12.0f);
 
-    std::string transactionRequestedAt = payload["transaction"]["requested_at"].get<std::string>();
+    const std::string& transactionRequestedAt = payload["transaction"]["requested_at"].get_ref<const std::string&>();
     vector[3] = hourOfDay(transactionRequestedAt) / 23.0f;
     vector[4] = dayOfWeek(transactionRequestedAt) / 6.0f;
 
@@ -99,12 +113,17 @@ std::array<float, 14> vectorizeTransaction(std::string_view body) {
     int customerTxCount24h = payload["customer"]["tx_count_24h"].get<int>();
     vector[8] = normalize(customerTxCount24h, 20.0f);
 
-    std::vector<std::string> customerKnownMerchants = payload["customer"]["known_merchants"].get<std::vector<std::string>>();
-    std::string merchantId = payload["merchant"]["id"].get<std::string>();
-    bool merchantIsKnown = std::find(customerKnownMerchants.begin(), customerKnownMerchants.end(), merchantId) != customerKnownMerchants.end();
+    const std::string& merchantId = payload["merchant"]["id"].get_ref<const std::string&>();
+    bool merchantIsKnown = false;
+    for (const auto& knownMerchant : payload["customer"]["known_merchants"]) {
+        if (knownMerchant.get_ref<const std::string&>() == merchantId) {
+            merchantIsKnown = true;
+            break;
+        }
+    }
     vector[11] = merchantIsKnown ? 0.0f : 1.0f;
 
-    std::string merchantMcc = payload["merchant"]["mcc"].get<std::string>();
+    const std::string& merchantMcc = payload["merchant"]["mcc"].get_ref<const std::string&>();
     const auto& mccRisk = getMccRisk();
     float risk = 0.5f;
     auto it = mccRisk.find(merchantMcc);
@@ -131,7 +150,7 @@ std::array<float, 14> vectorizeTransaction(std::string_view body) {
         vector[5] = -1.0f;
         vector[6] = -1.0f;
     } else {
-        std::string lastTransactionTimestamp = lastTransaction["timestamp"].get<std::string>();
+        const std::string& lastTransactionTimestamp = lastTransaction["timestamp"].get_ref<const std::string&>();
         float lastTransactionKmFromCurrent = lastTransaction["km_from_current"].get<float>();  
 
         int minutes = minutesBetween(lastTransactionTimestamp, transactionRequestedAt);

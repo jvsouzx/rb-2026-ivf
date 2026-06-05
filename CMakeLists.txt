@@ -25,7 +25,10 @@ if(BUILD_API)
             nlohmann_json::nlohmann_json
     )
 
-    target_compile_options(fraud_api PRIVATE -mavx2)
+    # Haswell e a ISA garantida do runner oficial (Mac Mini Late 2014). Evitamos
+    # -march=native porque o build ocorre em outra maquina.
+    target_compile_options(fraud_api PRIVATE -O3 -march=haswell -mtune=haswell -mavx2 -funroll-loops)
+    set_target_properties(fraud_api PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
 
 add_executable(preprocess_references

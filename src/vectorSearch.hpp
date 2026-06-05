@@ -48,6 +48,7 @@ struct DistanceValidationResult {
 std::array<bool, 5> approximateNearestFraudLabels(const std::array<std::uint8_t, 14>& queryVector);
 FraudScoreResult transactionIsApproved(const std::array<float, 14>& queryVector);
 const ReferenceStore& getReferences();
+void warmReferences();
 ReferenceStore loadIvfReferences(const std::string& path);
 int euclideanDistance(const std::array<std::uint8_t, 14>& queryVector, const std::uint8_t* referenceVector);
 DistanceValidationResult validateDistanceImplementations(const std::array<std::uint8_t, 14>& queryVector, std::size_t sampleCount);
