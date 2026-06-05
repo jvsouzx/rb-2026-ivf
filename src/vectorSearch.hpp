@@ -14,7 +14,7 @@ struct ReferenceStore {
     const std::uint8_t* mappedData = nullptr;
     const std::int16_t* centroids = nullptr;
     const std::uint32_t* offsets = nullptr;
-    const std::uint8_t* vectors = nullptr;
+    const std::int16_t* vectors = nullptr;
     const std::uint8_t* labels = nullptr;
 
     ReferenceStore() = default;
@@ -45,12 +45,12 @@ struct DistanceValidationResult {
     int firstAvx2Distance = 0;
 };
 
-std::array<bool, 5> approximateNearestFraudLabels(const std::array<std::uint8_t, 14>& queryVector);
+std::array<bool, 5> approximateNearestFraudLabels(const std::array<std::int16_t, 14>& queryVector);
 FraudScoreResult transactionIsApproved(const std::array<float, 14>& queryVector);
 const ReferenceStore& getReferences();
 void warmReferences();
 ReferenceStore loadIvfReferences(const std::string& path);
-int euclideanDistance(const std::array<std::uint8_t, 14>& queryVector, const std::uint8_t* referenceVector);
-DistanceValidationResult validateDistanceImplementations(const std::array<std::uint8_t, 14>& queryVector, std::size_t sampleCount);
+int euclideanDistance(const std::array<std::int16_t, 14>& queryVector, const std::int16_t* referenceVector);
+DistanceValidationResult validateDistanceImplementations(const std::array<std::int16_t, 14>& queryVector, std::size_t sampleCount);
 
 #endif

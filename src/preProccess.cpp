@@ -21,7 +21,7 @@ using json = nlohmann::json;
 
 namespace {
     constexpr std::uint32_t IvfReferencesMagic = 0x56494252; // "RBIV"
-    constexpr std::uint32_t IvfVersion = 2;
+    constexpr std::uint32_t IvfVersion = 3; // v3: vetores de referencia em int16 (antes uint8)
     constexpr int VectorDimensions = 14;
 
     struct IvfConfig {
@@ -33,7 +33,7 @@ namespace {
 
     struct ReferenceData {
         std::uint32_t count = 0;
-        std::vector<std::uint8_t> quantizedVectors;
+        std::vector<std::int16_t> quantizedVectors;
         std::vector<std::uint8_t> labels;
         std::vector<float> sampleVectors;
     };
@@ -92,10 +92,10 @@ namespace {
         return static_cast<int>(distance * 1000000.0f);
     }
 
-    int squaredDistanceToScaledCentroid(const std::uint8_t* vector, const std::int16_t* centroid) {
+    int squaredDistanceToScaledCentroid(const std::int16_t* vector, const std::int16_t* centroid) {
         int distance = 0;
         for (int dim = 0; dim < VectorDimensions; ++dim) {
-            int diff = static_cast<int>(quantizedDistanceValue(vector[dim])) - static_cast<int>(centroid[dim]);
+            int diff = static_cast<int>(vector[dim]) - static_cast<int>(centroid[dim]);
             distance += diff * diff;
         }
 
@@ -117,7 +117,7 @@ namespace {
         return best;
     }
 
-    std::uint32_t nearestScaledCentroid(const std::uint8_t* vector, const std::vector<std::int16_t>& centroids, std::uint32_t nlist) {
+    std::uint32_t nearestScaledCentroid(const std::int16_t* vector, const std::vector<std::int16_t>& centroids, std::uint32_t nlist) {
         std::uint32_t best = 0;
         int bestDistance = std::numeric_limits<int>::max();
 
@@ -236,8 +236,8 @@ namespace {
     std::vector<std::int16_t> scaleCentroids(const std::vector<float>& centroids) {
         std::vector<std::int16_t> scaled(centroids.size());
         for (std::size_t i = 0; i < centroids.size(); ++i) {
-            int value = static_cast<int>(std::round(centroids[i] / kQuantizeScale));
-            scaled[i] = static_cast<std::int16_t>(std::clamp(value, -254, 254));
+            int value = static_cast<int>(std::lround(centroids[i] / kQuantizeScale));
+            scaled[i] = static_cast<std::int16_t>(std::clamp(value, -kQuantizeLevels, kQuantizeLevels));
         }
 
         return scaled;
@@ -248,7 +248,7 @@ namespace {
         std::vector<std::uint32_t> offsets(static_cast<std::size_t>(nlist) + 1, 0);
 
         for (std::uint32_t i = 0; i < data.count; ++i) {
-            const std::uint8_t* vector = data.quantizedVectors.data() + static_cast<std::size_t>(i) * VectorDimensions;
+            const std::int16_t* vector = data.quantizedVectors.data() + static_cast<std::size_t>(i) * VectorDimensions;
             std::uint32_t centroid = nearestScaledCentroid(vector, scaledCentroids, nlist);
             assignments[i] = centroid;
             offsets[centroid + 1]++;
@@ -259,14 +259,14 @@ namespace {
         }
 
         std::vector<std::uint32_t> writePositions = offsets;
-        std::vector<std::uint8_t> sortedVectors(data.quantizedVectors.size());
+        std::vector<std::int16_t> sortedVectors(data.quantizedVectors.size());
         std::vector<std::uint8_t> sortedLabels(data.labels.size());
 
         for (std::uint32_t i = 0; i < data.count; ++i) {
             std::uint32_t centroid = assignments[i];
             std::uint32_t position = writePositions[centroid]++;
-            const std::uint8_t* source = data.quantizedVectors.data() + static_cast<std::size_t>(i) * VectorDimensions;
-            std::uint8_t* target = sortedVectors.data() + static_cast<std::size_t>(position) * VectorDimensions;
+            const std::int16_t* source = data.quantizedVectors.data() + static_cast<std::size_t>(i) * VectorDimensions;
+            std::int16_t* target = sortedVectors.data() + static_cast<std::size_t>(position) * VectorDimensions;
             std::copy(source, source + VectorDimensions, target);
             sortedLabels[position] = data.labels[i];
         }
@@ -292,7 +292,7 @@ namespace {
         }
 
         output.write(reinterpret_cast<const char*>(offsets.data()), static_cast<std::streamsize>(offsets.size() * sizeof(std::uint32_t)));
-        output.write(reinterpret_cast<const char*>(sortedVectors.data()), static_cast<std::streamsize>(sortedVectors.size()));
+        output.write(reinterpret_cast<const char*>(sortedVectors.data()), static_cast<std::streamsize>(sortedVectors.size() * sizeof(std::int16_t)));
         output.write(reinterpret_cast<const char*>(sortedLabels.data()), static_cast<std::streamsize>(sortedLabels.size()));
 
         if (!output) {

@@ -50,7 +50,7 @@ int main() {
     }
 
     std::array<float, 14> firstVector = vectorizeTransaction(payloads[0].dump());
-    std::array<std::uint8_t, 14> firstQuantizedVector = quantizeVector(firstVector);
+    std::array<std::int16_t, 14> firstQuantizedVector = quantizeVector(firstVector);
 
     DistanceValidationResult validation = validateDistanceImplementations(firstQuantizedVector, validationSamples);
     std::cout << "distance_validation.checked=" << validation.checked << "\n";

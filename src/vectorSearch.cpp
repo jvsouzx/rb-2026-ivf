@@ -22,7 +22,7 @@ const ReferenceStore& getReferences();
 
 namespace {
     constexpr std::uint32_t IvfReferencesMagic = 0x56494252; // "RBIV"
-    constexpr std::uint32_t IvfVersion = 2;
+    constexpr std::uint32_t IvfVersion = 3; // v3: vetores de referencia em int16
     constexpr int VectorDimensions = 14;
     constexpr std::size_t HeaderSize = sizeof(std::uint32_t) * 5;
     constexpr std::uint32_t MaxCentroidCandidates = 128;
@@ -116,15 +116,6 @@ namespace {
         return std::max<std::size_t>(std::max<std::size_t>(5, requested), firstPassCandidateCap);
     }
 
-    std::array<std::int16_t, VectorDimensions> distanceQueryValues(const std::array<std::uint8_t, 14>& queryVector) {
-        std::array<std::int16_t, VectorDimensions> values{};
-        for (int dim = 0; dim < VectorDimensions; ++dim) {
-            values[dim] = quantizedDistanceValue(queryVector[dim]);
-        }
-
-        return values;
-    }
-
     int horizontalSum8x32(__m256i values) {
         __m128i low = _mm256_castsi256_si128(values);
         __m128i high = _mm256_extracti128_si256(values, 1);
@@ -134,44 +125,34 @@ namespace {
         return _mm_cvtsi128_si32(sum);
     }
 
-    __m256i paddedQueryWords(const std::array<std::uint8_t, 14>& queryVector) {
-        alignas(16) std::uint8_t padded[16] = {};
-        std::memcpy(padded, queryVector.data(), queryVector.size());
-        __m128i queryBytes = _mm_load_si128(reinterpret_cast<const __m128i*>(padded));
-        __m256i queryWords = _mm256_cvtepu8_epi16(queryBytes);
-        const __m256i sentinel = _mm256_set1_epi16(255);
-        const __m256i sentinelValue = _mm256_set1_epi16(-254);
-        return _mm256_blendv_epi8(queryWords, sentinelValue, _mm256_cmpeq_epi16(queryWords, sentinel));
+    // Mascara que zera as 2 lanes de padding (dims 14 e 15 do registro de 16
+    // int16) — os vetores tem 14 dims, mas carregamos/processamos 16 por vez.
+    const __m256i kLaneMask = _mm256_set_epi16(
+        0, 0,
+        -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1);
+
+    __m256i paddedQueryWords(const std::array<std::int16_t, 14>& queryVector) {
+        alignas(32) std::int16_t padded[16] = {};
+        std::memcpy(padded, queryVector.data(), 14 * sizeof(std::int16_t));
+        return _mm256_load_si256(reinterpret_cast<const __m256i*>(padded));
     }
 
-    int euclideanDistanceAvx2(__m256i queryWords, const std::uint8_t* referenceVector) {
-        const __m128i mask = _mm_set_epi8(
-            0, 0,
-            static_cast<char>(0xff), static_cast<char>(0xff),
-            static_cast<char>(0xff), static_cast<char>(0xff),
-            static_cast<char>(0xff), static_cast<char>(0xff),
-            static_cast<char>(0xff), static_cast<char>(0xff),
-            static_cast<char>(0xff), static_cast<char>(0xff),
-            static_cast<char>(0xff), static_cast<char>(0xff),
-            static_cast<char>(0xff), static_cast<char>(0xff));
-
-        __m128i refBytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(referenceVector));
-        refBytes = _mm_and_si128(refBytes, mask);
-
-        __m256i refWords = _mm256_cvtepu8_epi16(refBytes);
-        const __m256i sentinel = _mm256_set1_epi16(255);
-        const __m256i sentinelValue = _mm256_set1_epi16(-254);
-        refWords = _mm256_blendv_epi8(refWords, sentinelValue, _mm256_cmpeq_epi16(refWords, sentinel));
+    int euclideanDistanceAvx2(__m256i queryWords, const std::int16_t* referenceVector) {
+        // Os valores ja vem em int16 (faltante = -kQuantizeLevels), entao a
+        // distancia e euclidiana direta — sem remapeamento de sentinela.
+        __m256i refWords = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(referenceVector));
         __m256i diff = _mm256_sub_epi16(refWords, queryWords);
+        diff = _mm256_and_si256(diff, kLaneMask); // anula as 2 lanes de padding
         __m256i squares = _mm256_madd_epi16(diff, diff);
 
         return horizontalSum8x32(squares);
     }
 
-    int euclideanDistanceScalar(const std::uint8_t* lhs, const std::uint8_t* rhs) {
+    int euclideanDistanceScalar(const std::int16_t* lhs, const std::int16_t* rhs) {
         int distance = 0;
         for (int dim = 0; dim < VectorDimensions; ++dim) {
-            int diff = static_cast<int>(quantizedDistanceValue(lhs[dim])) - static_cast<int>(quantizedDistanceValue(rhs[dim]));
+            int diff = static_cast<int>(lhs[dim]) - static_cast<int>(rhs[dim]);
             distance += diff * diff;
         }
 
@@ -272,7 +253,7 @@ namespace {
         return selectedSize;
     }
 
-    AnnSearchResult searchApproximateNeighbors(const std::array<std::uint8_t, 14>& queryVector, AnnSearchParams params) {
+    AnnSearchResult searchApproximateNeighbors(const std::array<std::int16_t, 14>& queryVector, AnnSearchParams params) {
         const ReferenceStore& refs = getReferences();
         std::array<Neighbor, 5> nearest{};
         std::array<CentroidCandidate, MaxCentroidCandidates> centroids{};
@@ -280,7 +261,7 @@ namespace {
         int worstIndex = 0;
         std::size_t candidatesScanned = 0;
         __m256i queryWords = paddedQueryWords(queryVector);
-        std::array<std::int16_t, VectorDimensions> centroidQuery = distanceQueryValues(queryVector);
+        const std::array<std::int16_t, VectorDimensions>& centroidQuery = queryVector;
 
         params.nprobe = std::clamp<std::uint32_t>(params.nprobe, 1, std::min(refs.nlist, MaxCentroidCandidates));
         params.candidateCap = std::max<std::size_t>(5, params.candidateCap);
@@ -301,7 +282,7 @@ namespace {
                     break;
                 }
 
-                const std::uint8_t* vector = refs.vectors + static_cast<std::size_t>(position) * VectorDimensions;
+                const std::int16_t* vector = refs.vectors + static_cast<std::size_t>(position) * VectorDimensions;
                 int distance = euclideanDistanceAvx2(queryWords, vector);
                 updateTop5(nearest, nearestSize, worstIndex, Neighbor{distance, refs.labels[position] == 1});
                 candidatesScanned++;
@@ -424,7 +405,7 @@ ReferenceStore loadIvfReferences(const std::string& path) {
     std::size_t offsetsStart = align4(HeaderSize + centroidsSize);
     std::size_t offsetsSize = (static_cast<std::size_t>(nlist) + 1) * sizeof(std::uint32_t);
     std::size_t vectorsStart = offsetsStart + offsetsSize;
-    std::size_t vectorsSize = static_cast<std::size_t>(count) * VectorDimensions;
+    std::size_t vectorsSize = static_cast<std::size_t>(count) * VectorDimensions * sizeof(std::int16_t);
     std::size_t labelsStart = vectorsStart + vectorsSize;
     std::size_t labelsSize = count;
     std::size_t expectedSize = labelsStart + labelsSize;
@@ -447,7 +428,7 @@ ReferenceStore loadIvfReferences(const std::string& path) {
     store.mappedData = data;
     store.centroids = reinterpret_cast<const std::int16_t*>(data + HeaderSize);
     store.offsets = offsets;
-    store.vectors = data + vectorsStart;
+    store.vectors = reinterpret_cast<const std::int16_t*>(data + vectorsStart);
     store.labels = data + labelsStart;
 
     std::cout << "Carregadas " << store.count
@@ -484,11 +465,11 @@ void warmReferences() {
     (void)sink;
 }
 
-int euclideanDistance(const std::array<uint8_t, 14>& queryVector, const uint8_t* referenceVector) {
+int euclideanDistance(const std::array<std::int16_t, 14>& queryVector, const std::int16_t* referenceVector) {
     return euclideanDistanceScalar(queryVector.data(), referenceVector);
 }
 
-DistanceValidationResult validateDistanceImplementations(const std::array<std::uint8_t, 14>& queryVector, std::size_t sampleCount) {
+DistanceValidationResult validateDistanceImplementations(const std::array<std::int16_t, 14>& queryVector, std::size_t sampleCount) {
     const ReferenceStore& refs = getReferences();
     __m256i queryWords = paddedQueryWords(queryVector);
     std::size_t checked = std::min<std::size_t>(sampleCount, refs.count);
@@ -497,7 +478,7 @@ DistanceValidationResult validateDistanceImplementations(const std::array<std::u
     result.checked = checked;
 
     for (std::size_t i = 0; i < checked; ++i) {
-        const std::uint8_t* vector = refs.vectors + i * VectorDimensions;
+        const std::int16_t* vector = refs.vectors + i * VectorDimensions;
         int scalarDistance = euclideanDistance(queryVector, vector);
         int avx2Distance = euclideanDistanceAvx2(queryWords, vector);
 
@@ -514,7 +495,7 @@ DistanceValidationResult validateDistanceImplementations(const std::array<std::u
     return result;
 }
 
-std::array<bool, 5> approximateNearestFraudLabels(const std::array<uint8_t, 14>& queryVector){
+std::array<bool, 5> approximateNearestFraudLabels(const std::array<std::int16_t, 14>& queryVector){
     const ReferenceStore& refs = getReferences();
     AnnSearchParams params{configuredNProbe(refs.nlist), configuredCandidateCap()};
     return searchApproximateNeighbors(queryVector, params).fraudLabels;
@@ -522,7 +503,7 @@ std::array<bool, 5> approximateNearestFraudLabels(const std::array<uint8_t, 14>&
 
 FraudScoreResult transactionIsApproved(const std::array<float, 14>& queryVector){
     const ReferenceStore& refs = getReferences();
-    std::array<uint8_t, 14> quantQuery = quantizeVector(queryVector);
+    std::array<std::int16_t, 14> quantQuery = quantizeVector(queryVector);
     AnnSearchParams firstPassParams{configuredNProbe(refs.nlist), configuredCandidateCap()};
     AnnSearchResult searchResult = searchApproximateNeighbors(quantQuery, firstPassParams);
 
