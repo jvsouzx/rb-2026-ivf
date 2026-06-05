@@ -17,12 +17,12 @@ services:
           memory: 50MB
 
   app1:
-    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.3
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.4
     environment:
       RB_IVF_NPROBE: "4"
       RB_IVF_CANDIDATE_CAP: "1024"
-      RB_IVF_FALLBACK_NPROBE: "4"
-      RB_IVF_FALLBACK_CANDIDATE_CAP: "1024"
+      RB_IVF_FALLBACK_NPROBE: "8"
+      RB_IVF_FALLBACK_CANDIDATE_CAP: "2048"
     networks:
       - lb-net
     deploy:
@@ -32,12 +32,12 @@ services:
           memory: 150MB
 
   app2:
-    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.3
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.4
     environment:
       RB_IVF_NPROBE: "4"
       RB_IVF_CANDIDATE_CAP: "1024"
-      RB_IVF_FALLBACK_NPROBE: "4"
-      RB_IVF_FALLBACK_CANDIDATE_CAP: "1024"
+      RB_IVF_FALLBACK_NPROBE: "8"
+      RB_IVF_FALLBACK_CANDIDATE_CAP: "2048"
     networks:
       - lb-net
     deploy:
