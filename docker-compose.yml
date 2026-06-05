@@ -13,11 +13,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: 50MB
 
   app1:
-    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.2
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.3
     environment:
       RB_IVF_NPROBE: "4"
       RB_IVF_CANDIDATE_CAP: "1024"
@@ -28,11 +28,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: 150MB
 
   app2:
-    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.2
+    image: ghcr.io/jvsouzx/rb-2026-ivf:0.0.3
     environment:
       RB_IVF_NPROBE: "4"
       RB_IVF_CANDIDATE_CAP: "1024"
@@ -43,7 +43,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: 150MB
 
 networks:
