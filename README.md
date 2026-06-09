@@ -45,6 +45,18 @@ flowchart TD
 
 O Nginx atua apenas como load balancer. A lógica de detecção fica exclusivamente nas instâncias da API.
 <!-- Stack -->
+## Stack utilizada
+- C++20
+- uWebSockets
+- nlohmann-json
+- Boost iostreams
+- CMake
+- vcpkg
+- Docker
+- Docker Compose
+- Nginx
+- AVX2
+- mmap
 <!-- Endpoints -->
 <!-- Como executar -->
 <!-- Benchmark -->
