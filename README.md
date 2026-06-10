@@ -58,6 +58,85 @@ O Nginx atua apenas como load balancer. A lógica de detecção fica exclusivame
 - AVX2
 - mmap
 <!-- Endpoints -->
+## Endpoints
+
+A API pública está exposta pelo Nginx na porta `9999`. As instâncias C++ escutam internamente na porta `8080` o load balancer só redireciona as requisições.
+
+### `GET /ready`
+
+Endpoint de prontidão usado pela engine da Rinha antes do teste de carga. Quando a aplicação terminar de carregar os dados de referência e estiver pronta para receber requisições, responde `HTTP 200` com JSON:
+
+```json
+{"status":"ready"}
+```
+
+### `POST /fraud-score`
+
+Endpoint principal de detecção de fraude. Recebe uma transação de cartão em JSON, transforma o payload em um vetor normalizado de 14 dimensões e consulta o índice IVF para estimar os 5 vizinhos mais próximos.
+
+Payload esperado:
+
+```json
+{
+  "id": "tx-3576980410",
+  "transaction": {
+    "amount": 384.88,
+    "installments": 3,
+    "requested_at": "2026-03-11T20:23:35Z"
+  },
+  "customer": {
+    "avg_amount": 769.76,
+    "tx_count_24h": 3,
+    "known_merchants": ["MERC-009", "MERC-001"]
+  },
+  "merchant": {
+    "id": "MERC-001",
+    "mcc": "5912",
+    "avg_amount": 298.95
+  },
+  "terminal": {
+    "is_online": false,
+    "card_present": true,
+    "km_from_home": 13.7090520965
+  },
+  "last_transaction": {
+    "timestamp": "2026-03-11T14:58:35Z",
+    "km_from_current": 18.8626479774
+  }
+}
+```
+
+`last_transaction` também pode ser `null`. Nesse caso, as dimensões `minutes_since_last_tx` e `km_from_last_tx` usam o valor sentinela `-1`.
+
+Resposta esperada:
+
+```json
+{
+  "approved": false,
+  "fraud_score": 1.0
+}
+```
+
+O `fraud_score` representa a fração de fraudes entre os 5 vizinhos mais próximos. A decisão segue o threshold oficial do desafio:
+
+```text
+approved = fraud_score < 0.6
+```
+
+Na prática, os scores possíveis são `0.0`, `0.2`, `0.4`, `0.6`, `0.8` e `1.0`.
+
+<!-- Limitações -->
+## Limitações do desafio
+
+- A API pública deve expor exatamente os endpoints `GET /ready` e `POST /fraud-score` na porta `9999`.
+- A arquitetura deve ter pelo menos um load balancer e duas instâncias de API. O load balancer não pode aplicar lógica de negócio, inspecionar payloads, transformar requisições ou responder no lugar da API.
+- A soma dos recursos declarados no `docker-compose` não pode passar de `1 CPU` e `350 MB` de memória. Nesta solução, o compose distribui `0.20 CPU / 50 MB` para o Nginx e `0.40 CPU / 150 MB` para cada uma das duas réplicas da API.
+- O modo de rede deve ser `bridge`; `network_mode: host` e `privileged` não são permitidos para a submissão.
+- As imagens usadas na submissão precisam estar públicas e ser compatíveis com `linux-amd64`.
+- O dataset de referência contém 3.000.000 vetores rotulados em 14 dimensões. Ele pode ser pré-processado no build ou no startup, mas os payloads do teste não podem ser usados como lookup ou base de referência.
+- O teste considera erro qualquer resposta de `/fraud-score` diferente de `HTTP 200`. Erros HTTP pesam mais na pontuação que falsos positivos e falsos negativos.
+- As requisições do teste de carga têm timeout de aproximadamente `2001ms`; p99 acima de `2000ms` aciona o corte de latência, e mais de `15%` de falhas aciona o corte de detecção.
+
 <!-- Como executar -->
 <!-- Benchmark -->
 <!-- Parâmetros de tuning -->
