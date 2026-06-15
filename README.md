@@ -30,6 +30,26 @@ flowchart TD
 ```
 
 <!-- Decisões técnicas -->
+## Decisões técnicas
+
+A primeira decisão foi manter a API em C++20 usando `uWebSockets`, com duas instâncias atrás do Nginx. No início o Nginx fazia o balanceamento como proxy HTTP/L7, mas depois foi alterado para `stream` TCP/L4 para reduzir o overhead na frente das APIs.
+
+O payload recebido no endpoint é transformado em um vetor normalizado de 14 dimensões. Essa vetorização concentra as variáveis numéricas, categóricas e booleanas em uma representação única para permitir comparação por distância.
+
+A primeira implementação de busca usava kNN direto sobre as referências. O `mcc_risk.json` passou a ficar em cache em memória, evitando releitura durante as requisições. Também foi criado um pré-processamento do `references.json.gz` no build da imagem para tirar parse e descompressão do runtime.
+
+Esse pré-processamento inicialmente gerava um `references.bin`. A ideia era mudar o layout das referências para um formato binário mais eficiente, carregar o arquivo via `mmap` e evitar custo de alocação/parsing na subida da API. Nessa fase, os vetores de referência foram quantizados para `uint8_t`, o cálculo de distância passou a usar AVX2 e o top-k foi otimizado com array fixo em vez de uma estrutura mais pesada.
+
+Depois disso foram criados buckets para reduzir o espaço de busca do kNN. Os buckets foram ajustados algumas vezes, inclusive com redução da flag para 1 bit, mas a abordagem acabou sendo substituída por um IVF-Flat customizado.
+
+Com o IVF, o pré-processamento passou a gerar `references.ivf`, não mais `references.bin`. O build treina k-means para gerar os centróides e escreve o índice com header, centróides, offsets, vetores e labels. Em runtime, a busca seleciona as `nprobe` melhores listas invertidas e limita a quantidade de candidatos com `candidate_cap`.
+
+A quantização dos vetores foi alterada de `uint8_t` para `int16_t`, preservando mais informação nas distâncias sem voltar para `float` em runtime. O `references.ivf` também é carregado via `mmap`; no startup, a API usa `madvise` e `warmReferences()` para aquecer o índice antes de responder `/ready`.
+
+No endpoint `/fraud-score`, a resposta JSON é montada manualmente para reduzir overhead de serialização. O build também foi ajustado para performance com `-O3`, `-march=haswell`, `-mtune=haswell`, `-mavx2`, `-funroll-loops` e LTO.
+
+Os parâmetros finais do IVF ficam configuráveis pelo `docker-compose`, incluindo `nlist`, `sample_size`, `iterations`, `nprobe` e `candidate_cap`. Também existem parâmetros de fallback, `RB_IVF_FALLBACK_NPROBE` e `RB_IVF_FALLBACK_CANDIDATE_CAP`, para aumentar a busca quando o caminho principal não encontra candidatos suficientes.
+
 <!-- Arquitetura -->
 ## Arquitetura
 
@@ -138,9 +158,67 @@ Na prática, os scores possíveis são `0.0`, `0.2`, `0.4`, `0.6`, `0.8` e `1.0`
 - As requisições do teste de carga têm timeout de aproximadamente `2001ms`; p99 acima de `2000ms` aciona o corte de latência, e mais de `15%` de falhas aciona o corte de detecção.
 
 <!-- Como executar -->
-<!-- Benchmark -->
-<!-- Parâmetros de tuning -->
-<!-- Estratégia de busca -->
+## Como Executar
+```shell
+docker compose build
+docker compose up -d
+``` 
+
 <!-- Resultados -->
-<!-- Aprendizados -->
-<!-- Próximos passos -->
+## Resultados
+
+Os resultados abaixo são da prévia da submissão.
+
+Submissão testada:
+
+- Repositório: `https://github.com/jvsouzx/rb-2026-ivf`
+- Imagem do Nginx: `nginx:alpine`
+- Imagem da API: `ghcr.io/jvsouzx/rb-2026-ivf:0.0.4`
+- Commit: `db88e84`
+- Recursos: `1 CPU` e `350 MB`
+
+Resumo do dataset da prévia:
+
+| Métrica | Valor |
+| --- | ---: |
+| Total de transações | `54100` |
+| Fraudes esperadas | `23959` |
+| Legítimas esperadas | `30141` |
+| Taxa de fraude | `44.29%` |
+| Taxa de legítimas | `55.71%` |
+| Edge cases | `645` |
+| Taxa de edge cases | `1.19%` |
+
+Resultado geral:
+
+| Métrica | Valor |
+| --- | ---: |
+| Score final | `5473.7191` |
+| Score de latência p99 | `2564.0281` |
+| Score de detecção | `2909.6910` |
+| p99 | `2.7288 ms` |
+| HTTP errors | `0` |
+| Failure rate | `0.0018%` |
+| Error rate epsilon | `0.00185%` |
+| Weighted errors E | `1` |
+| Componente de taxa da detecção | `3000` |
+| Penalidade absoluta da detecção | `-90.3090` |
+
+Breakdown da detecção:
+
+| Métrica | Valor |
+| --- | ---: |
+| True positives | `23942` |
+| True negatives | `30116` |
+| False positives | `1` |
+| False negatives | `0` |
+
+Nenhum corte foi acionado na prévia: tanto o corte de latência quanto o corte de detecção ficaram como `false`.
+
+Runtime validado pela engine:
+
+| Serviço | CPU | Memória |
+| --- | ---: | ---: |
+| Nginx | `0.20` | `50 MB` |
+| API 1 | `0.40` | `150 MB` |
+| API 2 | `0.40` | `150 MB` |
